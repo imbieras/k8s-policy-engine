@@ -1,0 +1,217 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: policy-engine-sa
+  namespace: default
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: policy-engine-role
+rules:
+# Permission to manage RoleBindings
+- apiGroups: ["rbac.authorization.k8s.io"]
+  resources: ["rolebindings"]
+  verbs: ["create", "delete", "list", "get"]
+# Permission to grant access to pods (required to create RoleBindings with these permissions)
+- apiGroups: [""]
+  resources: ["pods", "pods/exec", "pods/log"]
+  verbs: ["get", "list", "create"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: policy-engine-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: policy-engine-role
+subjects:
+- kind: ServiceAccount
+  name: policy-engine-sa
+  namespace: default
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: policy-engine-config
+  namespace: default
+data:
+  DB_PATH: "/var/lib/policy-engine/requests.db"
+  PORT: "8080"
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: policy-engine-db-pvc
+  namespace: default
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: standard
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: policy-engine
+  namespace: default
+  labels:
+    app: policy-engine
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: policy-engine
+  template:
+    metadata:
+      labels:
+        app: policy-engine
+    spec:
+      serviceAccountName: policy-engine-sa
+      containers:
+      - name: policy-engine
+        image: policy-engine:latest
+        imagePullPolicy: Never  # For local development
+        ports:
+        - containerPort: 8080
+          name: http
+        env:
+        - name: DB_PATH
+          valueFrom:
+            configMapKeyRef:
+              name: policy-engine-config
+              key: DB_PATH
+        - name: PORT
+          valueFrom:
+            configMapKeyRef:
+              name: policy-engine-config
+              key: PORT
+        volumeMounts:
+        - name: db-volume
+          mountPath: /var/lib/policy-engine
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+      volumes:
+      - name: db-volume
+        persistentVolumeClaim:
+          claimName: policy-engine-db-pvc
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: policy-engine
+  namespace: default
+  labels:
+    app: policy-engine
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8080
+    targetPort: 8080
+    protocol: TCP
+    name: http
+  selector:
+    app: policy-engine
+
+---
+# Mock app deployment 
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: restricted-app
+  namespace: default
+  labels:
+    app: restricted-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: restricted-app
+  template:
+    metadata:
+      labels:
+        app: restricted-app
+    spec:
+      containers:
+      - name: app
+        image: nginx:alpine
+        ports:
+        - containerPort: 80
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "50m"
+          limits:
+            memory: "128Mi"
+            cpu: "100m"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: restricted-app
+  namespace: default
+  labels:
+    app: restricted-app
+spec:
+  type: ClusterIP
+  ports:
+  - port: 80
+    targetPort: 80
+    protocol: TCP
+  selector:
+    app: restricted-app
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: restricted-developer
+  namespace: default
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["pods/exec"]
+  verbs: ["create", "get"]
+- apiGroups: [""]
+  resources: ["pods/log"]
+  verbs: ["get"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pod-viewer
+  namespace: default
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
