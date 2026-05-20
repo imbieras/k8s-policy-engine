@@ -1,0 +1,435 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: policy-engine-sa
+  namespace: default
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: policy-engine-role
+rules:
+# Permission to manage RoleBindings
+- apiGroups: ["rbac.authorization.k8s.io"]
+  resources: ["rolebindings"]
+  verbs: ["create", "delete", "list", "get"]
+# Permission to grant access to pods (required to create RoleBindings with these permissions)
+- apiGroups: [""]
+  resources: ["pods", "pods/exec", "pods/log"]
+  verbs: ["get", "list", "create"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: policy-engine-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: policy-engine-role
+subjects:
+- kind: ServiceAccount
+  name: policy-engine-sa
+  namespace: default
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: policy-engine-config
+  namespace: default
+data:
+  DB_PATH: "/var/lib/policy-engine/requests.db"
+  PORT: "8080"
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: policy-engine-db-pvc
+  namespace: default
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: standard
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: policy-engine
+  namespace: default
+  labels:
+    app: policy-engine
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: policy-engine
+  template:
+    metadata:
+      labels:
+        app: policy-engine
+    spec:
+      serviceAccountName: policy-engine-sa
+      containers:
+      - name: policy-engine
+        image: policy-engine:latest
+        imagePullPolicy: Never  # For local development
+        ports:
+        - containerPort: 8080
+          name: http
+        env:
+        - name: DB_PATH
+          valueFrom:
+            configMapKeyRef:
+              name: policy-engine-config
+              key: DB_PATH
+        - name: PORT
+          valueFrom:
+            configMapKeyRef:
+              name: policy-engine-config
+              key: PORT
+        - name: REDIS_ADDR
+          value: "redis:6379"
+        - name: OIDC_ISSUER
+          value: "http://keycloak:8080/realms/policy-engine"
+        - name: OIDC_CLIENT_ID
+          value: "policy-engine-cli"
+        - name: OIDC_TOKEN_ISSUER
+          value: "http://localhost:8081/realms/policy-engine"
+        - name: POLICY_ENGINE_MODEL_PATH_XGB
+          value: "/app/models/model_xgb.onnx"
+        - name: POLICY_ENGINE_MODEL_PATH_LGBM
+          value: "/app/models/model_lgbm.onnx"
+        - name: ORT_LIB_LOCATION
+          value: "/app/onnxruntime/lib"
+        - name: GEOIP_DB_PATH
+          value: "/app/geoip/GeoLite2-City.mmdb"
+        - name: KEYCLOAK_EXTERNAL_URL
+          value: "http://localhost:8081/realms/policy-engine"
+        volumeMounts:
+        - name: db-volume
+          mountPath: /var/lib/policy-engine
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "500m"
+      volumes:
+      - name: db-volume
+        persistentVolumeClaim:
+          claimName: policy-engine-db-pvc
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: policy-engine
+  namespace: default
+  labels:
+    app: policy-engine
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8080
+    targetPort: 8080
+    protocol: TCP
+    name: http
+  selector:
+    app: policy-engine
+
+---
+# Mock app deployment 
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: restricted-app
+  namespace: default
+  labels:
+    app: restricted-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: restricted-app
+  template:
+    metadata:
+      labels:
+        app: restricted-app
+    spec:
+      containers:
+      - name: app
+        image: nginx:alpine
+        ports:
+        - containerPort: 80
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "50m"
+          limits:
+            memory: "128Mi"
+            cpu: "100m"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: restricted-app
+  namespace: default
+  labels:
+    app: restricted-app
+spec:
+  type: ClusterIP
+  ports:
+  - port: 80
+    targetPort: 80
+    protocol: TCP
+  selector:
+    app: restricted-app
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: restricted-developer
+  namespace: default
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["pods/exec"]
+  verbs: ["create", "get"]
+- apiGroups: [""]
+  resources: ["pods/log"]
+  verbs: ["get"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pod-viewer
+  namespace: default
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+
+---
+# Redis
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: default
+  labels:
+    app: redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+      - name: redis
+        image: redis:7
+        ports:
+        - containerPort: 6379
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "50m"
+          limits:
+            memory: "128Mi"
+            cpu: "200m"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: default
+spec:
+  type: ClusterIP
+  ports:
+  - port: 6379
+    targetPort: 6379
+  selector:
+    app: redis
+
+---
+# Keycloak
+apiVersion: v1
+kind: Secret
+metadata:
+  name: keycloak-credentials
+  namespace: default
+stringData:
+  admin-user: admin
+  admin-password: admin
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: keycloak-realm
+  namespace: default
+data:
+  realm.json: |
+    {
+      "realm": "policy-engine",
+      "enabled": true,
+      "registrationAllowed": false,
+      "attributes": {
+        "frontendUrl": "http://localhost:8081",
+        "oauth2DeviceCodeLifespan": "600",
+        "oauth2DevicePollingInterval": "5"
+      },
+      "oauth2DeviceCodeLifespan": 600,
+      "oauth2DevicePollingInterval": 5,
+      "accessTokenLifespan": 3600,
+      "ssoSessionIdleTimeout": 7200,
+      "ssoSessionMaxLifespan": 86400,
+      "clients": [
+        {
+          "clientId": "policy-engine-cli",
+          "enabled": true,
+          "publicClient": true,
+          "standardFlowEnabled": false,
+          "directAccessGrantsEnabled": false,
+          "consentRequired": false,
+          "attributes": {
+            "oauth2.device.authorization.grant.enabled": "true"
+          },
+          "protocolMappers": [
+            {
+              "name": "groups",
+              "protocol": "openid-connect",
+              "protocolMapper": "oidc-group-membership-mapper",
+              "config": {
+                "claim.name": "groups",
+                "full.path": "false",
+                "id.token.claim": "true",
+                "access.token.claim": "true",
+                "userinfo.token.claim": "true"
+              }
+            }
+          ]
+        }
+      ],
+      "users": [
+        {
+          "username": "developer",
+          "enabled": true,
+          "firstName": "Dev",
+          "lastName": "User",
+          "email": "developer@example.com",
+          "emailVerified": true,
+          "credentials": [
+            {
+              "type": "password",
+              "value": "developer",
+              "temporary": false
+            }
+          ]
+        }
+      ]
+    }
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak
+  namespace: default
+  labels:
+    app: keycloak
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: keycloak
+  template:
+    metadata:
+      labels:
+        app: keycloak
+    spec:
+      containers:
+      - name: keycloak
+        image: quay.io/keycloak/keycloak:25.0
+        args: ["start-dev", "--import-realm"]
+        env:
+        - name: KEYCLOAK_ADMIN
+          valueFrom:
+            secretKeyRef:
+              name: keycloak-credentials
+              key: admin-user
+        - name: KEYCLOAK_ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: keycloak-credentials
+              key: admin-password
+        ports:
+        - containerPort: 8080
+          name: http
+        volumeMounts:
+        - name: realm-config
+          mountPath: /opt/keycloak/data/import
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        readinessProbe:
+          httpGet:
+            path: /realms/policy-engine/.well-known/openid-configuration
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          failureThreshold: 12
+      volumes:
+      - name: realm-config
+        configMap:
+          name: keycloak-realm
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+  namespace: default
+  labels:
+    app: keycloak
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8080
+    targetPort: 8080
+    name: http
+  selector:
+    app: keycloak

@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "policy-engine-ml"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "requests>=2.32",
+    "PyJWT>=2.9",
+    "faker>=26",
+    "duckdb==1.1.*",
+    "pyarrow>=17",
+    "pandas>=2.2",
+    "xgboost==2.1.*",
+    "lightgbm==4.5.*",
+    "scikit-learn>=1.5",
+    "imbalanced-learn>=0.12",
+    "optuna>=4",
+    "shap>=0.46",
+    "onnxmltools>=1.13",
+    "skl2onnx>=1.17",
+    "onnxruntime>=1.20",
+    "psutil>=6",
+    "matplotlib>=3.9",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["data"]

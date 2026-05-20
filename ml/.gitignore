@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+
+# large datasets / raw data
+data/raw/
+data/*.parquet
+data/labeled_audit.jsonl
+data/labeled_audit.jsonl.bak
+
+# generated outputs
+data/figures/
+data/models/*.onnx
